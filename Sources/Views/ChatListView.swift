@@ -11,7 +11,14 @@ struct ChatListView: WindowView, @unchecked Sendable {
     @State private var maximized = false
     @State("gptModel") private var selectedModel = ChatGPTModel.gpt_hyphen_4o_hyphen_mini.rawValue
     @State("systemPrompt") private var systemPrompt = "You're a helpful assistant"
-    let models = ChatGPTModel.allCases
+    enum Backend: String, CaseIterable, Identifiable {
+        case openai = "OpenAI"
+        case custom = "Custom"
+        var id: String { self.rawValue }
+    }
+    @State("backend") private var selectedBackend: Backend = .openai
+    @State("apiBaseURL") private var apiBaseURL = ""
+    @State private var models: [String] = ChatGPTModel.allCases.map { $0.rawValue }
     @State("temperature") private var temperature: Double = 0.5
 
     @State private var chatState = ChatListState()
@@ -21,8 +28,7 @@ struct ChatListView: WindowView, @unchecked Sendable {
         ""
     nonisolated(unsafe) static var chatListScrollView: ChatListScrollView?
 
-    static let chatGPTAPI = ChatGPTAPI(
-        apiKey: "")
+    static var chatGPTAPI: ChatGPTAPI = ChatGPTAPI(apiKey: "")
 
     var view: Body {
         VStack {
@@ -151,7 +157,7 @@ struct ChatListView: WindowView, @unchecked Sendable {
 
         }
         .onAppear {
-            Self.chatGPTAPI.updateAPIKey(apiKey)
+            Self.updateAPI(apiKey: apiKey, apiBaseURL: apiBaseURL)
         }
         .aboutDialog(
             visible: $showAbout,
@@ -163,25 +169,33 @@ struct ChatListView: WindowView, @unchecked Sendable {
             issues: .init(string: "https://github.com/alfianlosari/GTKChatGPT/issues")
         )
         .alertDialog(
-            visible: $showPreferences, heading: "Settings", body: "Bring your own OpenAI API Key"
+            visible: $showPreferences, heading: "Settings", body: "Bring your own OpenAI API Key and custom endpoint (optional)"
         ) {
-
             ScrollView {
                 VStack {
                     FormSection("API") {
                         Form {
+                            ComboRow("Backend", selection: $selectedBackend, values: Backend.allCases.map { $0.rawValue })
                             EntryRow("API Key", text: $apiKey)
                                 .secure(text: $apiKey)
-                            LinkButton(uri: "https://platform.openai.com")
-
+                            if selectedBackend == .custom {
+                                EntryRow("Custom API Endpoint", text: $apiBaseURL)
+                                    .placeholder("https://your.custom.endpoint/v1")
+                            }
+                            if selectedBackend == .openai {
+                                LinkButton(uri: "https://platform.openai.com")
+                            }
                         }
-
                     }
                     .padding()
 
                     FormSection("Configuration") {
                         Form {
                             ComboRow("ChatGPT Model", selection: $selectedModel, values: models)
+                            Button("Update Models") {
+                                Self.updateModels()
+                            }
+                            .style("suggested-action")
                             EntryRow("System Prompt", text: $systemPrompt)
                             SpinRow(
                                 "Temperature", value: $temperature,
@@ -190,10 +204,57 @@ struct ChatListView: WindowView, @unchecked Sendable {
                             .step(0.1)
                             .digits(1)
                             .subtitle("Response Creativity")
-
                         }
                     }
                     .padding()
+    // Helper to update models from API
+    static func fetchModels(apiKey: String, backend: Backend, apiBaseURL: String, completion: @escaping ([String]) -> Void) {
+        let baseURL: String
+        switch backend {
+        case .openai:
+            baseURL = "https://api.openai.com/v1"
+        case .custom:
+            baseURL = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !baseURL.isEmpty, let url = URL(string: baseURL + "/models") else {
+            completion([])
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data, error == nil else {
+                completion([])
+                return
+            }
+            do {
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let modelList = json["data"] as? [[String: Any]] {
+                    let ids = modelList.compactMap { $0["id"] as? String }
+                    completion(ids)
+                } else {
+                    completion([])
+                }
+            } catch {
+                completion([])
+            }
+        }
+        task.resume()
+    }
+
+    func updateModels() {
+        Self.fetchModels(apiKey: apiKey, backend: selectedBackend, apiBaseURL: apiBaseURL) { ids in
+            DispatchQueue.main.async {
+                if !ids.isEmpty {
+                    self.models = ids
+                    if !ids.contains(self.selectedModel) {
+                        self.selectedModel = ids.first ?? ""
+                    }
+                }
+            }
+        }
+    }
                 }
             }
             .frame(minWidth: 512, minHeight: 210)
@@ -201,8 +262,23 @@ struct ChatListView: WindowView, @unchecked Sendable {
             .frame(maxHeight: 512)
         }
         .response("Close", appearance: .suggested, role: .close) {
-            Self.chatGPTAPI.updateAPIKey(apiKey)
+            Self.updateAPI(apiKey: apiKey, apiBaseURL: apiBaseURL)
         }
+    // Helper to update ChatGPTAPI instance with custom endpoint
+    static func updateAPI(apiKey: String, apiBaseURL: String, backend: Backend = .openai) {
+        let baseURL: String
+        switch backend {
+        case .openai:
+            baseURL = "https://api.openai.com/v1"
+        case .custom:
+            baseURL = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if baseURL.isEmpty {
+            chatGPTAPI = ChatGPTAPI(apiKey: apiKey)
+        } else {
+            chatGPTAPI = ChatGPTAPI(apiKey: apiKey, apiBaseURL: baseURL)
+        }
+    }
     }
 
     func sendMessage(text: String) {
